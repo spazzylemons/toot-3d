@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git" }
+libc = "0.2.140"
