@@ -3,6 +3,10 @@ name = "toot-3d"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+bindgen = "0.64.0"
+
 [dependencies]
 ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git" }
+ctru-sys = { git = "https://github.com/rust3ds/ctru-rs.git" }
 libc = "0.2.140"
