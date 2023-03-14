@@ -1,19 +1,24 @@
-use std::{error::Error, io::{Write, Read}};
+use std::error::Error;
 
 use ctru::prelude::*;
+use net::curl;
+use ui::{C2dGlobal, RenderTarget};
 
 mod net;
+mod types;
+mod ui;
 
-fn main_wrapped() -> Result<(), Box<dyn Error>> {
-    let soc = Soc::init()?;
+fn main_wrapped(gfx: &Gfx) -> Result<(), Box<dyn Error>> {
+    // need the socket service open, or we'll not have socket access
+    let _soc = Soc::init()?;
+    // initialize cURL globals
+    let _global = curl::Global::new();
 
-    // attempt to connect to a server
-    let mut conn = net::connect(&soc, "mastodon.social")?;
-    conn.write_all(b"GET / HTTP/1.1\r\nHost: mastodon.social\r\n\r\n")?;
-    let mut x = [0u8; 100];
-    let length = conn.read(&mut x)?;
-    println!("LENGTH: {}", length);
-    println!("{}", unsafe { String::from_utf8_unchecked(x[0..length].to_vec()) });
+    let citro2d = C2dGlobal::new(gfx);
+    let target = RenderTarget::new_2d(&citro2d, gfx.top_screen.borrow_mut());
+
+    let conn = net::Client::new(target)?;
+    conn.basic_toot()?;
 
     Ok(())
 }
@@ -23,9 +28,9 @@ fn main() {
     let hid = Hid::init().unwrap();
     let apt = Apt::init().unwrap();
 
-    let _console = ctru::console::Console::init(gfx.top_screen.borrow_mut());
+    let _console = ctru::console::Console::init(gfx.bottom_screen.borrow_mut());
 
-    if let Err(e) = main_wrapped() {
+    if let Err(e) = main_wrapped(&gfx) {
         println!("{}", e);
     }
 

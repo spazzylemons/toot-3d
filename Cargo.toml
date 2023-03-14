@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [build-dependencies]
+cc = "1.0.79"
 bindgen = "0.64.0"
 
 [dependencies]
+bit-set = "0.5.3"
 ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git" }
-ctru-sys = { git = "https://github.com/rust3ds/ctru-rs.git" }
 libc = "0.2.140"
+qrcode = { version = "0.12.0", default-features = false }
+serde = { version = "1.0.155", features = ["alloc", "derive"] }
+serde_json = "1.0.94"
