@@ -2,22 +2,19 @@ use std::error::Error;
 
 use ctru::prelude::*;
 use net::curl;
-use ui::{C2dGlobal, RenderTarget};
+use ui::citro2d::Citro2d;
 
 mod net;
 mod types;
 mod ui;
 
-fn main_wrapped(gfx: &Gfx) -> Result<(), Box<dyn Error>> {
+fn main_wrapped(c2d: &Citro2d) -> Result<(), Box<dyn Error>> {
     // need the socket service open, or we'll not have socket access
     let _soc = Soc::init()?;
     // initialize cURL globals
     let _global = curl::Global::new();
 
-    let citro2d = C2dGlobal::new(gfx);
-    let target = RenderTarget::new_2d(&citro2d, gfx.top_screen.borrow_mut());
-
-    let conn = net::Client::new(target)?;
+    let conn = net::Client::new(c2d)?;
     conn.basic_toot()?;
 
     Ok(())
@@ -28,9 +25,11 @@ fn main() {
     let hid = Hid::init().unwrap();
     let apt = Apt::init().unwrap();
 
-    let _console = ctru::console::Console::init(gfx.bottom_screen.borrow_mut());
+    let c2d = Citro2d::new(gfx).unwrap();
 
-    if let Err(e) = main_wrapped(&gfx) {
+    let _console = ctru::console::Console::init(c2d.gfx().bottom_screen.borrow_mut());
+
+    if let Err(e) = main_wrapped(&c2d) {
         println!("{}", e);
     }
 
@@ -41,6 +40,6 @@ fn main() {
             break;
         }
 
-        gfx.wait_for_vblank();
+        c2d.gfx().wait_for_vblank();
     }
 }

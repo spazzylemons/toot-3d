@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     net::curl,
     types::{Application, Token},
-    ui::{color32, get_input, Frame, RenderTarget},
+    ui::{
+        citro2d::{color32, Citro2d, Image, Luminance4, RenderTarget},
+        get_input,
+    },
 };
 
 use super::curl::Easy;
@@ -62,7 +65,6 @@ impl Canvas for MyCanvas {
 }
 
 static BLACK: u32 = color32(0, 0, 0, 255);
-static WHITE: u32 = color32(255, 255, 255, 255);
 
 #[derive(Default, Deserialize, Serialize)]
 struct ClientData {
@@ -74,14 +76,16 @@ struct ClientData {
 
 static CLIENT_DATA_PATH: &str = "/toot-3d.json";
 
-pub struct Client<'a> {
+pub struct Client<'screen, 'gfx> {
     easy: Easy,
-    target: RenderTarget<'a>,
+    c2d: &'gfx Citro2d,
+    target: RenderTarget<'screen, 'gfx>,
     data: ClientData,
 }
 
-impl<'a> Client<'a> {
-    pub fn new(target: RenderTarget<'a>) -> Result<Self, Box<dyn Error>> {
+impl<'screen, 'gfx: 'screen> Client<'screen, 'gfx> {
+    pub fn new(c2d: &'gfx Citro2d) -> Result<Self, Box<dyn Error>> {
+        let target = RenderTarget::new_2d(c2d, c2d.gfx().top_screen.borrow_mut())?;
         // attempt to load the client data
         let mut data = ClientData::default();
         let mut loaded_from_file = false;
@@ -92,7 +96,12 @@ impl<'a> Client<'a> {
             }
         }
         let easy = curl::Easy::new();
-        let mut result = Self { easy, target, data };
+        let mut result = Self {
+            easy,
+            c2d,
+            target,
+            data,
+        };
         // if we failed to load from file, do auth flow to get data
         if !loaded_from_file {
             result.authorize()?;
@@ -197,28 +206,32 @@ impl<'a> Client<'a> {
         let image = qr.render::<MyPixel>().build();
 
         // draw QR code here
-        let frame = Frame::new();
-        self.target.scene_2d(frame, |ctx| {
-            self.target.clear(BLACK);
+        let frame = self.c2d.begin_frame();
+        let width = image.width as u16;
+        let height = image.height as u16;
+        let image = Image::build::<Luminance4, _>(self.c2d, width, height, |texture| {
+            // no filtering, so the qr code is crisp
+            texture.set_filter(false);
             let mut i = 0;
-            for y in 0..image.height {
-                for x in 0..image.width {
-                    let px = 2.0 * (x as f32) + 0.5;
-                    let py = 2.0 * (y as f32) + 0.5;
-                    ctx.rect_solid(
-                        px,
-                        py,
-                        0.0,
-                        2.0,
-                        2.0,
-                        if image.bits.contains(i) { BLACK } else { WHITE },
-                    );
+            for y in 0..height {
+                for x in 0..width {
+                    // SAFETY: for loops keep us in range
+                    unsafe {
+                        texture.set_unchecked(x, y, if image.bits.contains(i) { 0 } else { 15 });
+                    }
                     i += 1;
                 }
             }
-
-            ctx
+        })
+        .unwrap();
+        self.target.clear(BLACK);
+        self.target.scene_2d(&frame, |ctx| {
+            // draw centered and 2x scale
+            let x = 200.0 - f32::from(width);
+            let y = 120.0 - f32::from(height);
+            image.draw(ctx, x, y, 2.0, 2.0);
         });
+        drop(frame);
 
         // the user will need to manually type the code in, but only once!
         let auth_code = get_input("Scan QR, authorize, and enter code", true)?;
