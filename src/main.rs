@@ -1,45 +1,49 @@
-use std::error::Error;
+use std::{error::Error, thread::spawn};
 
 use ctru::prelude::*;
 use net::curl;
-use ui::citro2d::Citro2d;
+use ui::{citro2d::Citro2d, screen::ErrorScreen, LogicImgPool, Ui, UiMsg, UiMsgSender};
 
 mod net;
 mod types;
 mod ui;
 
-fn main_wrapped(c2d: &Citro2d) -> Result<(), Box<dyn Error>> {
+fn logic_main(tx: UiMsgSender) -> Result<(), Box<dyn Error>> {
     // need the socket service open, or we'll not have socket access
     let _soc = Soc::init()?;
     // initialize cURL globals
     let _global = curl::Global::new();
 
-    let conn = net::Client::new(c2d)?;
-    conn.basic_toot()?;
-
-    Ok(())
+    let pool = LogicImgPool::new(tx.clone());
+    let conn = net::Client::new(tx.clone(), pool.clone())?;
+    conn.basic_toot()
 }
 
 fn main() {
     let gfx = Gfx::init().unwrap();
-    let hid = Hid::init().unwrap();
-    let apt = Apt::init().unwrap();
-
     let c2d = Citro2d::new(gfx).unwrap();
-
     let _console = ctru::console::Console::init(c2d.gfx().bottom_screen.borrow_mut());
 
-    if let Err(e) = main_wrapped(&c2d) {
-        println!("{}", e);
-    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut ui = Ui::new(&c2d, rx).unwrap();
 
-    while apt.main_loop() {
-        hid.scan_input();
+    let logic = spawn(move || {
+        let tx = tx;
+        if let Err(e) = logic_main(tx.clone()) {
+            let (screen, rx) = ErrorScreen::new(format!("{}", e));
+            tx.send(UiMsg::SetScreen(Box::new(screen))).unwrap();
+            // wait for screen to request close
+            rx.recv().unwrap();
+        }
+        tx.send(UiMsg::Quit).unwrap();
+    });
 
-        if hid.keys_held().contains(KeyPad::KEY_START) {
+    loop {
+        if !ui.iteration() {
             break;
         }
-
-        c2d.gfx().wait_for_vblank();
     }
+
+    // TODO handling quit request from main thread
+    logic.join().unwrap();
 }

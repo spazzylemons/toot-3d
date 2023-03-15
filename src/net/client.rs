@@ -1,70 +1,14 @@
 use std::{error::Error, fs::File};
 
-use bit_set::BitSet;
-use qrcode::{
-    render::{Canvas, Pixel},
-    QrCode,
-};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     net::curl,
     types::{Application, Token},
-    ui::{
-        citro2d::{color32, Citro2d, Image, Luminance4, RenderTarget},
-        get_input,
-    },
+    ui::{get_input, screen::QrScreen, LogicImgPool, UiMsg, UiMsgSender},
 };
 
 use super::curl::Easy;
-
-#[derive(Clone, Copy)]
-struct MyPixel(());
-
-impl Pixel for MyPixel {
-    type Canvas = MyCanvas;
-    type Image = MyCanvas;
-
-    fn default_unit_size() -> (u32, u32) {
-        (1, 1)
-    }
-
-    fn default_color(_color: qrcode::Color) -> Self {
-        Self(())
-    }
-}
-
-struct MyCanvas {
-    bits: BitSet,
-    width: u32,
-    height: u32,
-}
-
-impl Canvas for MyCanvas {
-    type Pixel = MyPixel;
-    type Image = Self;
-
-    fn new(width: u32, height: u32, _dark_pixel: Self::Pixel, _light_pixel: Self::Pixel) -> Self {
-        let size = (width * height) as usize;
-        let bits = BitSet::with_capacity(size);
-        Self {
-            bits,
-            width,
-            height,
-        }
-    }
-
-    fn draw_dark_pixel(&mut self, x: u32, y: u32) {
-        let index = y * self.width + x;
-        self.bits.insert(index as _);
-    }
-
-    fn into_image(self) -> Self::Image {
-        self
-    }
-}
-
-static BLACK: u32 = color32(0, 0, 0, 255);
 
 #[derive(Default, Deserialize, Serialize)]
 struct ClientData {
@@ -76,16 +20,16 @@ struct ClientData {
 
 static CLIENT_DATA_PATH: &str = "/toot-3d.json";
 
-pub struct Client<'screen, 'gfx> {
+pub struct Client {
     easy: Easy,
-    c2d: &'gfx Citro2d,
-    target: RenderTarget<'screen, 'gfx>,
     data: ClientData,
+
+    tx: UiMsgSender,
+    pool: LogicImgPool,
 }
 
-impl<'screen, 'gfx: 'screen> Client<'screen, 'gfx> {
-    pub fn new(c2d: &'gfx Citro2d) -> Result<Self, Box<dyn Error>> {
-        let target = RenderTarget::new_2d(c2d, c2d.gfx().top_screen.borrow_mut())?;
+impl Client {
+    pub fn new(tx: UiMsgSender, pool: LogicImgPool) -> Result<Self, Box<dyn Error>> {
         // attempt to load the client data
         let mut data = ClientData::default();
         let mut loaded_from_file = false;
@@ -98,9 +42,9 @@ impl<'screen, 'gfx: 'screen> Client<'screen, 'gfx> {
         let easy = curl::Easy::new();
         let mut result = Self {
             easy,
-            c2d,
-            target,
             data,
+            tx,
+            pool,
         };
         // if we failed to load from file, do auth flow to get data
         if !loaded_from_file {
@@ -202,36 +146,8 @@ impl<'screen, 'gfx: 'screen> Client<'screen, 'gfx> {
             self.data.instance, self.data.id,
         );
 
-        let qr = QrCode::new(request_url)?;
-        let image = qr.render::<MyPixel>().build();
-
-        // draw QR code here
-        let frame = self.c2d.begin_frame();
-        let width = image.width as u16;
-        let height = image.height as u16;
-        let image = Image::build::<Luminance4, _>(self.c2d, width, height, |texture| {
-            // no filtering, so the qr code is crisp
-            texture.set_filter(false);
-            let mut i = 0;
-            for y in 0..height {
-                for x in 0..width {
-                    // SAFETY: for loops keep us in range
-                    unsafe {
-                        texture.set_unchecked(x, y, if image.bits.contains(i) { 0 } else { 15 });
-                    }
-                    i += 1;
-                }
-            }
-        })
-        .unwrap();
-        self.target.clear(BLACK);
-        self.target.scene_2d(&frame, |ctx| {
-            // draw centered and 2x scale
-            let x = 200.0 - f32::from(width);
-            let y = 120.0 - f32::from(height);
-            image.draw(ctx, x, y, 2.0, 2.0);
-        });
-        drop(frame);
+        let screen = QrScreen::new(request_url.as_bytes(), self.pool.clone())?;
+        self.tx.send(UiMsg::SetScreen(Box::new(screen)))?;
 
         // the user will need to manually type the code in, but only once!
         let auth_code = get_input("Scan QR, authorize, and enter code", true)?;

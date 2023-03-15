@@ -1,6 +1,7 @@
 use std::{
     cell::RefMut,
     error::Error,
+    ffi::CString,
     fmt::Display,
     marker::PhantomData,
     mem::MaybeUninit,
@@ -11,7 +12,7 @@ use std::{
     },
 };
 
-use ctru::{gfx::Screen, prelude::Gfx};
+use ctru::{gfx::Screen, prelude::Gfx, services::cfgu::Cfgu};
 
 #[allow(non_snake_case)]
 #[allow(non_upper_case_globals)]
@@ -499,6 +500,194 @@ impl<'gfx> Drop for Image<'gfx> {
             drop(Box::from_raw(
                 self.image.subtex as *mut c::Tex3DS_SubTexture,
             ));
+        }
+    }
+}
+
+pub struct Font<'gfx> {
+    font: c::C2D_Font,
+    _phantom: PhantomData<&'gfx ()>,
+}
+
+impl<'gfx> Font<'gfx> {
+    pub fn new(_c2d: &'gfx Citro2d) -> ctru::Result<Option<Self>> {
+        // select font from system region - hopefully correct?
+        let cfgu = Cfgu::init()?;
+        let region = cfgu.get_region()?;
+        let font = unsafe { c::C2D_FontLoadSystem(region as _) };
+        // null means system font
+        if font.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(Self {
+                font,
+                _phantom: PhantomData,
+            }))
+        }
+    }
+}
+
+impl<'gfx> Drop for Font<'gfx> {
+    fn drop(&mut self) {
+        unsafe {
+            c::C2D_FontFree(self.font);
+        }
+    }
+}
+
+pub struct TextBuf<'gfx> {
+    buf: c::C2D_TextBuf,
+    _phantom: PhantomData<&'gfx ()>,
+}
+
+impl<'gfx> TextBuf<'gfx> {
+    pub fn new(_c2d: &'gfx Citro2d, size: usize) -> Result<Self, C2dMemError> {
+        let buf = unsafe { c::C2D_TextBufNew(size) };
+        if buf.is_null() {
+            Err(C2dMemError)
+        } else {
+            Ok(Self {
+                buf,
+                _phantom: PhantomData,
+            })
+        }
+    }
+
+    pub fn clear(&self) {
+        unsafe {
+            c::C2D_TextBufClear(self.buf);
+        }
+    }
+}
+
+impl<'gfx> Drop for TextBuf<'gfx> {
+    fn drop(&mut self) {
+        unsafe {
+            c::C2D_TextBufDelete(self.buf);
+        }
+    }
+}
+
+#[derive(Default)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Right,
+    Center,
+    Justified,
+}
+
+#[derive(Default)]
+pub struct TextConfig {
+    pub baseline: bool,
+    pub color: Option<u32>,
+    pub align: TextAlign,
+    pub wrap_width: Option<f32>,
+}
+
+impl TextConfig {
+    fn to_flags(&self) -> u32 {
+        let mut result = 0;
+
+        if self.baseline {
+            result |= 1 << 0;
+        }
+
+        if self.color.is_some() {
+            result |= 1 << 1;
+        }
+
+        result |= match self.align {
+            TextAlign::Left => 0 << 2,
+            TextAlign::Right => 1 << 2,
+            TextAlign::Center => 2 << 2,
+            TextAlign::Justified => 3 << 2,
+        };
+
+        if self.wrap_width.is_some() {
+            result |= 1 << 4;
+        }
+
+        result
+    }
+}
+
+pub struct Text<'gfx, 'buf, 'font> {
+    text: c::C2D_Text,
+    _phantom: PhantomData<(&'gfx (), &'buf (), &'font ())>,
+}
+
+impl<'gfx, 'buf, 'font> Text<'gfx, 'buf, 'font> {
+    pub fn parse(
+        font: Option<&'font Font<'gfx>>,
+        buf: &'buf TextBuf<'gfx>,
+        str: &str,
+    ) -> Result<Self, Box<dyn Error>> {
+        let str = CString::new(str)?;
+        let text = unsafe {
+            let mut text = MaybeUninit::uninit();
+            // docs say that this can fail, but afaict it can't
+            if c::C2D_TextFontParse(
+                text.as_mut_ptr(),
+                match font {
+                    Some(font) => font.font,
+                    None => std::ptr::null_mut(),
+                },
+                buf.buf,
+                str.as_ptr(),
+            )
+            .is_null()
+            {
+                panic!("C2D_TextFontParse() failed");
+            }
+            text.assume_init()
+        };
+        Ok(Self {
+            text,
+            _phantom: PhantomData,
+        })
+    }
+
+    #[inline]
+    pub fn optimize(&self) {
+        unsafe {
+            c::C2D_TextOptimize(&self.text);
+        }
+    }
+
+    pub fn draw(&self, _ctx: &Scene2d, config: &TextConfig, x: f32, y: f32, scale: f32) {
+        let flags = config.to_flags();
+        unsafe {
+            if let Some(width) = config.wrap_width {
+                if let Some(color) = config.color {
+                    c::C2D_DrawText(
+                        &self.text,
+                        flags,
+                        x,
+                        y,
+                        0.5,
+                        scale,
+                        scale,
+                        color,
+                        width as std::ffi::c_double,
+                    );
+                } else {
+                    c::C2D_DrawText(
+                        &self.text,
+                        flags,
+                        x,
+                        y,
+                        0.5,
+                        scale,
+                        scale,
+                        width as std::ffi::c_double,
+                    );
+                }
+            } else if let Some(color) = config.color {
+                c::C2D_DrawText(&self.text, flags, x, y, 0.5, scale, scale, color);
+            } else {
+                c::C2D_DrawText(&self.text, flags, x, y, 0.5, scale, scale);
+            }
         }
     }
 }
