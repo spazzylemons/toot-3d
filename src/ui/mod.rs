@@ -8,9 +8,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+pub use kbd::KeyboardError;
+
 use bit_set::BitSet;
 use ctru::services::{Apt, Hid};
-pub use kbd::get_input;
 
 use self::citro2d::{color32, Citro2d, Image, RenderTarget, Scene2d, Text, TextBuf, TextConfig};
 
@@ -76,6 +77,18 @@ impl<'gfx: 'screen, 'screen> Ui<'gfx, 'screen> {
                     self.screen = screen;
                 }
 
+                UiMsg::Flush => break,
+
+                UiMsg::Keyboard {
+                    hint,
+                    restrict,
+                    blank_allowed,
+                    tx,
+                } => {
+                    tx.send(kbd::get_input(hint, restrict, blank_allowed))
+                        .unwrap();
+                }
+
                 UiMsg::Quit => return false,
             }
         }
@@ -120,7 +133,13 @@ impl<'gfx: 'screen, 'screen> Ui<'gfx, 'screen> {
         self.buf.clear();
         // if the text fails to render, we'll just not render anything
         if let Ok(text) = Text::parse(None, &self.buf, text) {
-            text.draw(ctx, config, x, y, scale);
+            let dimensions = text.dimensions(scale);
+            // cull text to avoid overflowing command buffer
+            let max_x = x + dimensions.0;
+            let max_y = y + dimensions.1;
+            if x <= 400.0 && max_x >= 0.0 && y <= 240.0 && max_y >= 0.0 {
+                text.draw(ctx, config, x, y, scale);
+            }
         }
     }
 }
@@ -143,12 +162,39 @@ pub enum UiMsg {
     UnloadImage(usize),
     /// Switch to a new screen.
     SetScreen(Box<dyn Screen>),
+    /// Stop processing messages for this frame, in order to show the current screen.
+    Flush,
+    /// Open the keyboard and wait for a response.
+    Keyboard {
+        hint: &'static str,
+        restrict: bool,
+        blank_allowed: bool,
+        tx: std::sync::mpsc::Sender<Result<String, KeyboardError>>,
+    },
     /// Quit the application.
     Quit,
 }
 
 pub type UiMsgSender = std::sync::mpsc::Sender<UiMsg>;
 pub type UiMsgReceiver = std::sync::mpsc::Receiver<UiMsg>;
+
+pub fn get_input(
+    sender: &UiMsgSender,
+    hint: &'static str,
+    restrict: bool,
+    blank_allowed: bool,
+) -> Result<String, KeyboardError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    sender
+        .send(UiMsg::Keyboard {
+            hint,
+            restrict,
+            blank_allowed,
+            tx,
+        })
+        .unwrap();
+    rx.recv().unwrap()
+}
 
 /// Allocates images on the logic thread.
 #[derive(Clone)]
@@ -209,7 +255,7 @@ impl Drop for OpaqueImg {
 }
 
 pub trait Screen: Send {
-    fn update(&self, hid: &Hid) {
+    fn update(&mut self, hid: &Hid) {
         _ = hid;
     }
 

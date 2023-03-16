@@ -20,7 +20,7 @@ impl ErrorScreen {
 }
 
 impl Screen for ErrorScreen {
-    fn update(&self, hid: &ctru::services::Hid) {
+    fn update(&mut self, hid: &ctru::services::Hid) {
         // tell logic thread to close the screen when start is pressed
         if hid.keys_down().contains(KeyPad::KEY_START) {
             self.on_close.send(()).unwrap();

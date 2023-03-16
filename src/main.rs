@@ -2,7 +2,11 @@ use std::{error::Error, thread::spawn};
 
 use ctru::prelude::*;
 use net::curl;
-use ui::{citro2d::Citro2d, screen::ErrorScreen, LogicImgPool, Ui, UiMsg, UiMsgSender};
+use ui::{
+    citro2d::Citro2d,
+    screen::{ErrorScreen, TimelineScreen},
+    LogicImgPool, Ui, UiMsg, UiMsgSender,
+};
 
 mod net;
 mod types;
@@ -15,8 +19,11 @@ fn logic_main(tx: UiMsgSender) -> Result<(), Box<dyn Error>> {
     let _global = curl::Global::new();
 
     let pool = LogicImgPool::new(tx.clone());
-    let conn = net::Client::new(tx.clone(), pool.clone())?;
-    conn.basic_toot()
+    let client = net::Client::new(tx.clone(), pool.clone())?;
+
+    tx.send(UiMsg::SetScreen(Box::new(TimelineScreen::new(&client)?)))?;
+
+    Ok(())
 }
 
 fn main() {
@@ -34,8 +41,10 @@ fn main() {
             tx.send(UiMsg::SetScreen(Box::new(screen))).unwrap();
             // wait for screen to request close
             rx.recv().unwrap();
+            // send quit message
+            tx.send(UiMsg::Quit).unwrap();
         }
-        tx.send(UiMsg::Quit).unwrap();
+        // if no error, just keep screen open
     });
 
     loop {

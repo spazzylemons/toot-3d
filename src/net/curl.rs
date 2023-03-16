@@ -215,6 +215,27 @@ impl Easy {
         std::mem::swap(&mut result, &mut mine);
         result
     }
+
+    pub fn escape(&self, s: &str) -> Result<CurlString, CurlError> {
+        let raw = if s.is_empty() {
+            // if length of the string is 0, curl will try to get the length, but that
+            // is a bad idea as the string isn't null-terminated! so instead, we will
+            // call strdup ourselves, which is what curl does internally for 0-length strings.
+            extern "C" {
+                fn strdup(s: *const std::ffi::c_char) -> *mut std::ffi::c_char;
+            }
+
+            unsafe { strdup(b"\0".as_ptr()) }
+        } else {
+            unsafe { c::curl_easy_escape(self.curl, s.as_ptr(), s.len() as _) }
+        };
+        // if given null pointer, then allocation failed
+        if raw.is_null() {
+            Err(CurlError(c::CURLcode_CURLE_OUT_OF_MEMORY))
+        } else {
+            Ok(unsafe { CurlString::take(raw) })
+        }
+    }
 }
 
 impl Drop for Easy {
@@ -254,5 +275,34 @@ impl Mime {
 impl Drop for Mime {
     fn drop(&mut self) {
         unsafe { c::curl_mime_free(self.mime) };
+    }
+}
+
+/// Wraps a string that cURL gave us ownership of, avoiding unnecessary reallocation.
+pub struct CurlString {
+    raw: *mut std::ffi::c_char,
+    len: usize,
+}
+
+impl CurlString {
+    unsafe fn take(raw: *mut std::ffi::c_char) -> Self {
+        extern "C" {
+            fn strlen(s: *const std::ffi::c_char) -> usize;
+        }
+        let len = strlen(raw);
+        Self { raw, len }
+    }
+}
+
+impl AsRef<str> for CurlString {
+    fn as_ref(&self) -> &str {
+        // assume valid encoding for our cases
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.raw, self.len)) }
+    }
+}
+
+impl Drop for CurlString {
+    fn drop(&mut self) {
+        unsafe { c::curl_free(self.raw as *mut _) }
     }
 }

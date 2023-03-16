@@ -49,7 +49,7 @@ impl Citro2d {
         if CITRO_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
             // initialize citro2d
             unsafe {
-                if !c::C3D_Init(c::C3D_DEFAULT_CMDBUF_SIZE as _) {
+                if !c::C3D_Init((4 * c::C3D_DEFAULT_CMDBUF_SIZE) as _) {
                     return Err(C2dMemError);
                 }
                 if !c::C2D_Init(c::C2D_DEFAULT_MAX_OBJECTS as _) {
@@ -202,11 +202,7 @@ pub const fn color32(r: u8, g: u8, b: u8, a: u8) -> u32 {
 }
 
 /// A format of a texture.
-/// This trait is marked as unsafe because it provides safe interfaces that
-/// could result in undefined behavior if not implemented correctly. In
-/// particular, the size of the texture must be valid in order to properly flush
-/// the texture cache.
-pub unsafe trait TextureFormat {
+pub trait TextureFormat {
     /// The pixel type.
     type Pixel;
     /// The format enum.
@@ -214,8 +210,6 @@ pub unsafe trait TextureFormat {
     /// Set a pixel. Assumes that the texture coordinates are in range. Causes
     /// undefined behavior if not in range.
     unsafe fn set(data: *mut std::ffi::c_void, x: u16, y: u16, width: u16, pixel: Self::Pixel);
-    /// Get the size of a texture in bytes given its dimensions.
-    fn size(width: u16, height: u16) -> usize;
 }
 
 // Texture indexing code adapated from Citra source code
@@ -242,7 +236,7 @@ fn buffer_offset(x: usize, y: usize, width: usize, nybbles_per_pixel: usize) -> 
 /// A 4-bit luminance texture format.
 pub struct Luminance4;
 
-unsafe impl TextureFormat for Luminance4 {
+impl TextureFormat for Luminance4 {
     type Pixel = u8;
 
     const FORMAT: c::GPU_TEXCOLOR = c::GPU_TEXCOLOR_GPU_L4;
@@ -258,10 +252,6 @@ unsafe impl TextureFormat for Luminance4 {
             *byte_ptr &= 0x0f;
             *byte_ptr |= pixel << 4;
         }
-    }
-
-    fn size(width: u16, height: u16) -> usize {
-        (usize::from(width) * usize::from(height)) >> 1
     }
 }
 
@@ -330,12 +320,9 @@ impl<'gfx, T: TextureFormat> Texture<'gfx, T> {
     }
 
     /// Flush the GPU cache for this texture. Only valid if not a cubemap.
-    pub fn flush_cache(&self) {
-        let ptr = self.any.data_ptr();
-        // SAFETY: TextureFormat is an unsafe trait, so we rely on it to safely
-        // tell us how many bytes a texture takes.
+    pub fn flush(&mut self) {
         unsafe {
-            c::GSPGPU_FlushDataCache(ptr, T::size(self.any.width(), self.any.height()) as _);
+            c::C3D_TexFlush(&mut self.any.tex);
         }
     }
 
@@ -468,7 +455,7 @@ impl<'gfx> Image<'gfx> {
         // initialize it
         f(&mut texture);
         // flush cache automatically
-        texture.flush_cache();
+        texture.flush();
         Ok(Self::new(texture.any, width, height))
     }
 
@@ -653,6 +640,17 @@ impl<'gfx, 'buf, 'font> Text<'gfx, 'buf, 'font> {
         unsafe {
             c::C2D_TextOptimize(&self.text);
         }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn dimensions(&self, scale: f32) -> (f32, f32) {
+        let mut width = 0.0;
+        let mut height = 0.0;
+        unsafe {
+            c::C2D_TextGetDimensions(&self.text, scale, scale, &mut width, &mut height);
+        }
+        (width, height)
     }
 
     pub fn draw(&self, _ctx: &Scene2d, config: &TextConfig, x: f32, y: f32, scale: f32) {
