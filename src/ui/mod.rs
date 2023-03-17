@@ -1,8 +1,10 @@
 pub mod citro2d;
 mod kbd;
 pub mod screen;
+mod text;
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
     error::Error,
     sync::{Arc, Mutex},
@@ -13,7 +15,10 @@ pub use kbd::KeyboardError;
 use bit_set::BitSet;
 use ctru::services::{Apt, Hid};
 
-use self::citro2d::{color32, Citro2d, Image, RenderTarget, Scene2d, Text, TextBuf, TextConfig};
+use self::{
+    citro2d::{color32, Citro2d, Image, RenderTarget, Scene2d},
+    text::{TextLines, TextRenderer},
+};
 
 pub struct Ui<'gfx, 'screen> {
     apt: Apt,
@@ -23,10 +28,11 @@ pub struct Ui<'gfx, 'screen> {
     receiver: UiMsgReceiver,
 
     target: RenderTarget<'gfx, 'screen>,
-    buf: TextBuf<'gfx>,
 
     pool: HashMap<usize, Image<'gfx>>,
     screen: Box<dyn Screen>,
+
+    text_renderer: RefCell<TextRenderer<'gfx>>,
 }
 
 impl<'gfx: 'screen, 'screen> Ui<'gfx, 'screen> {
@@ -35,10 +41,11 @@ impl<'gfx: 'screen, 'screen> Ui<'gfx, 'screen> {
         let hid = Hid::init()?;
 
         let target = RenderTarget::new_2d(c2d, c2d.gfx().top_screen.borrow_mut())?;
-        let buf = TextBuf::new(c2d, 4096)?;
 
         let pool = HashMap::new();
         let screen = Box::new(EmptyScreen);
+
+        let text_renderer = RefCell::new(TextRenderer::new(c2d)?);
 
         Ok(Self {
             apt,
@@ -46,9 +53,9 @@ impl<'gfx: 'screen, 'screen> Ui<'gfx, 'screen> {
             c2d,
             receiver,
             target,
-            buf,
             pool,
             screen,
+            text_renderer,
         })
     }
 
@@ -89,6 +96,17 @@ impl<'gfx: 'screen, 'screen> Ui<'gfx, 'screen> {
                         .unwrap();
                 }
 
+                UiMsg::WordWrap {
+                    text,
+                    width,
+                    scale,
+                    tx,
+                } => {
+                    let mut renderer = self.text_renderer.borrow_mut();
+                    let lines = TextLines::new(&text, &mut renderer, width, scale);
+                    tx.send(lines).unwrap();
+                }
+
                 UiMsg::Quit => return false,
             }
         }
@@ -121,26 +139,9 @@ impl<'gfx: 'screen, 'screen> Ui<'gfx, 'screen> {
         }
     }
 
-    pub fn draw_text(
-        &self,
-        ctx: &Scene2d,
-        config: &TextConfig,
-        text: &str,
-        x: f32,
-        y: f32,
-        scale: f32,
-    ) {
-        self.buf.clear();
-        // if the text fails to render, we'll just not render anything
-        if let Ok(text) = Text::parse(None, &self.buf, text) {
-            let dimensions = text.dimensions(scale);
-            // cull text to avoid overflowing command buffer
-            let max_x = x + dimensions.0;
-            let max_y = y + dimensions.1;
-            if x <= 400.0 && max_x >= 0.0 && y <= 240.0 && max_y >= 0.0 {
-                text.draw(ctx, config, x, y, scale);
-            }
-        }
+    pub fn draw_lines(&self, ctx: &Scene2d, x: f32, y: f32, color: u32, lines: &TextLines) {
+        let mut renderer = self.text_renderer.borrow_mut();
+        lines.render(&mut renderer, ctx, x, y, color);
     }
 }
 
@@ -170,6 +171,13 @@ pub enum UiMsg {
         restrict: bool,
         blank_allowed: bool,
         tx: std::sync::mpsc::Sender<Result<String, KeyboardError>>,
+    },
+    /// Wrap lines of text.
+    WordWrap {
+        text: String,
+        width: f32,
+        scale: f32,
+        tx: std::sync::mpsc::Sender<TextLines>,
     },
     /// Quit the application.
     Quit,

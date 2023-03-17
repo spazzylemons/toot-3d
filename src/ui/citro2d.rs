@@ -1,24 +1,25 @@
 use std::{
     cell::RefMut,
     error::Error,
-    ffi::CString,
     fmt::Display,
     marker::PhantomData,
     mem::MaybeUninit,
     ops::Deref,
+    pin::Pin,
+    rc::Rc,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex, MutexGuard,
     },
 };
 
-use ctru::{gfx::Screen, prelude::Gfx, services::cfgu::Cfgu};
+use ctru::{gfx::Screen, prelude::Gfx};
 
 #[allow(non_snake_case)]
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
-mod c {
+pub mod c {
     include!(concat!(env!("OUT_DIR"), "/citro2d.rs"));
 }
 
@@ -57,6 +58,8 @@ impl Citro2d {
                     return Err(C2dMemError);
                 }
                 c::C2D_Prepare();
+                // using solid tint mode for text, no tint used for other stuff yet
+                c::C2D_SetTintMode(c::C2D_TintMode_C2D_TintSolid);
             }
         }
         Ok(Self(gfx))
@@ -288,6 +291,10 @@ impl TexDim {
         }
         Ok(Self(result))
     }
+
+    pub unsafe fn assume_valid(dim: u16) -> Self {
+        Self(dim)
+    }
 }
 
 impl Deref for TexDim {
@@ -319,13 +326,6 @@ impl<'gfx, T: TextureFormat> Texture<'gfx, T> {
         T::set(self.any.data_ptr(), x, y, self.any.width(), pixel);
     }
 
-    /// Flush the GPU cache for this texture. Only valid if not a cubemap.
-    pub fn flush(&mut self) {
-        unsafe {
-            c::C3D_TexFlush(&mut self.any.tex);
-        }
-    }
-
     #[inline]
     pub fn set_filter(&mut self, filter: bool) {
         self.any.set_filter(filter);
@@ -336,6 +336,8 @@ impl<'gfx, T: TextureFormat> Texture<'gfx, T> {
 pub struct AnyTexture<'gfx> {
     /// The wrapped texture.
     tex: c::C3D_Tex,
+    /// If true, we own the texture data. If false, it is global and should not be freed.
+    owned: bool,
     /// Locks us to citro2d reference
     _phantom: PhantomData<&'gfx ()>,
 }
@@ -365,8 +367,36 @@ impl<'gfx> AnyTexture<'gfx> {
         }
         Ok(Self {
             tex,
+            owned: true,
             _phantom: PhantomData,
         })
+    }
+
+    pub unsafe fn raw(
+        _c2d: &'gfx Citro2d,
+        data: &'static mut [u8],
+        width: TexDim,
+        height: TexDim,
+        format: c::GPU_TEXCOLOR,
+    ) -> Self {
+        let mut tex = std::mem::zeroed::<c::C3D_Tex>();
+        tex.set_fmt(format);
+        tex.set_size(data.len() as _);
+        tex.border = 0;
+        tex.__bindgen_anon_1.data = data.as_mut_ptr() as *mut _;
+        tex.__bindgen_anon_2.__bindgen_anon_1.width = *width;
+        tex.__bindgen_anon_2.__bindgen_anon_1.height = *height;
+        tex.__bindgen_anon_3.lodParam = 0;
+        c::C3D_TexSetWrap_NotInlined(
+            &mut tex,
+            c::GPU_TEXTURE_WRAP_PARAM_GPU_CLAMP_TO_BORDER,
+            c::GPU_TEXTURE_WRAP_PARAM_GPU_CLAMP_TO_BORDER,
+        );
+        Self {
+            tex,
+            owned: false,
+            _phantom: PhantomData,
+        }
     }
 
     pub fn set_filter(&mut self, filter: bool) {
@@ -396,12 +426,21 @@ impl<'gfx> AnyTexture<'gfx> {
         // SAFETY: we never make a cubemap, so this union variant is always valid
         unsafe { self.tex.__bindgen_anon_1.data }
     }
+
+    /// Flush the GPU cache for this texture. Only valid if not a cubemap.
+    pub fn flush(&mut self) {
+        unsafe {
+            c::C3D_TexFlush(&mut self.tex);
+        }
+    }
 }
 
 impl<'gfx> Drop for AnyTexture<'gfx> {
     fn drop(&mut self) {
-        unsafe {
-            c::C3D_TexDelete(&mut self.tex);
+        if self.owned {
+            unsafe {
+                c::C3D_TexDelete(&mut self.tex);
+            }
         }
     }
 }
@@ -410,31 +449,56 @@ impl<'gfx> Drop for AnyTexture<'gfx> {
 pub struct Image<'gfx> {
     /// Wrapped type
     image: c::C2D_Image,
+    /// Reference-counted texture reference
+    _texture: Pin<Rc<AnyTexture<'gfx>>>,
     // reference to Citro2d
     _phantom: PhantomData<&'gfx ()>,
 }
 
 impl<'gfx> Image<'gfx> {
-    pub fn new(texture: AnyTexture<'gfx>, width: u16, height: u16) -> Self {
-        // NOTE - by taking ownership of the texture, we can't do aliasing
-        // maybe we could use an Rc type if necessary, but we'd need to cast a
-        // const pointer to a mut pointer
-        let tex = Box::new(texture.tex);
+    pub fn new(
+        texture: Pin<Rc<AnyTexture<'gfx>>>,
+        x: f32,
+        y: f32,
+        width: u16,
+        height: u16,
+    ) -> Self {
+        let w = f32::from(texture.width());
+        let h = f32::from(texture.height());
+        let left = x / w;
+        let top = (h - y) / h;
+        let right = (f32::from(width) + x) / w;
+        let bottom = (h - f32::from(height) - y) / h;
+        Self::new_texcoord(texture, width, height, left, top, right, bottom)
+    }
+
+    pub fn new_texcoord(
+        texture: Pin<Rc<AnyTexture<'gfx>>>,
+        width: u16,
+        height: u16,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    ) -> Self {
         let subtex = Box::new(c::Tex3DS_SubTexture {
             width,
             height,
-            left: 0.0,
-            top: 1.0,
-            right: f32::from(width) / f32::from(texture.width()),
-            bottom: 1.0 - (f32::from(height) / f32::from(texture.height())),
+            left,
+            top,
+            right,
+            bottom,
         });
         // use leak to pass ownership to image type, we'll reclaim it later to drop it
         let image = c::C2D_Image {
-            tex: Box::leak(tex),
+            // unfortunately this field is not declared constant. In order to allow
+            // atlasing, we will pretend that it is declared constant.
+            tex: texture.as_ref().get_ref() as *const _ as *mut _,
             subtex: Box::leak(subtex),
         };
         Self {
             image,
+            _texture: texture,
             _phantom: PhantomData,
         }
     }
@@ -455,8 +519,8 @@ impl<'gfx> Image<'gfx> {
         // initialize it
         f(&mut texture);
         // flush cache automatically
-        texture.flush();
-        Ok(Self::new(texture.any, width, height))
+        texture.any.flush();
+        Ok(Self::new(Rc::pin(texture.any), 0.0, 0.0, width, height))
     }
 
     pub fn draw(&self, _ctx: &Scene2d, x: f32, y: f32, scale_x: f32, scale_y: f32) {
@@ -472,220 +536,40 @@ impl<'gfx> Image<'gfx> {
             );
         }
     }
+
+    pub fn draw_tint(&self, _ctx: &Scene2d, x: f32, y: f32, scale_x: f32, scale_y: f32, tint: u32) {
+        let tint = c::C2D_ImageTint {
+            corners: [
+                c::C2D_Tint {
+                    color: tint,
+                    blend: 1.0,
+                },
+                c::C2D_Tint {
+                    color: tint,
+                    blend: 1.0,
+                },
+                c::C2D_Tint {
+                    color: tint,
+                    blend: 1.0,
+                },
+                c::C2D_Tint {
+                    color: tint,
+                    blend: 1.0,
+                },
+            ],
+        };
+        unsafe {
+            c::C2D_DrawImageAt_NotInlined(self.image, x, y, 0.5, &tint, scale_x, scale_y);
+        }
+    }
 }
 
 impl<'gfx> Drop for Image<'gfx> {
     fn drop(&mut self) {
-        // SAFETY: the TexDelete() call drops the C texture struct, which must
-        // be done. The from_raw() calls allow us to drop data that we
-        // previously allocated in Boxes, and stored using Box::leak(). Since we
-        // own the pointers, and they come from Boxes, they are safe to wrap in
-        // Boxes.
         unsafe {
-            c::C3D_TexDelete(self.image.tex);
-            drop(Box::from_raw(self.image.tex));
             drop(Box::from_raw(
                 self.image.subtex as *mut c::Tex3DS_SubTexture,
             ));
-        }
-    }
-}
-
-pub struct Font<'gfx> {
-    font: c::C2D_Font,
-    _phantom: PhantomData<&'gfx ()>,
-}
-
-impl<'gfx> Font<'gfx> {
-    pub fn new(_c2d: &'gfx Citro2d) -> ctru::Result<Option<Self>> {
-        // select font from system region - hopefully correct?
-        let cfgu = Cfgu::init()?;
-        let region = cfgu.get_region()?;
-        let font = unsafe { c::C2D_FontLoadSystem(region as _) };
-        // null means system font
-        if font.is_null() {
-            Ok(None)
-        } else {
-            Ok(Some(Self {
-                font,
-                _phantom: PhantomData,
-            }))
-        }
-    }
-}
-
-impl<'gfx> Drop for Font<'gfx> {
-    fn drop(&mut self) {
-        unsafe {
-            c::C2D_FontFree(self.font);
-        }
-    }
-}
-
-pub struct TextBuf<'gfx> {
-    buf: c::C2D_TextBuf,
-    _phantom: PhantomData<&'gfx ()>,
-}
-
-impl<'gfx> TextBuf<'gfx> {
-    pub fn new(_c2d: &'gfx Citro2d, size: usize) -> Result<Self, C2dMemError> {
-        let buf = unsafe { c::C2D_TextBufNew(size) };
-        if buf.is_null() {
-            Err(C2dMemError)
-        } else {
-            Ok(Self {
-                buf,
-                _phantom: PhantomData,
-            })
-        }
-    }
-
-    pub fn clear(&self) {
-        unsafe {
-            c::C2D_TextBufClear(self.buf);
-        }
-    }
-}
-
-impl<'gfx> Drop for TextBuf<'gfx> {
-    fn drop(&mut self) {
-        unsafe {
-            c::C2D_TextBufDelete(self.buf);
-        }
-    }
-}
-
-#[derive(Default)]
-pub enum TextAlign {
-    #[default]
-    Left,
-    Right,
-    Center,
-    Justified,
-}
-
-#[derive(Default)]
-pub struct TextConfig {
-    pub baseline: bool,
-    pub color: Option<u32>,
-    pub align: TextAlign,
-    pub wrap_width: Option<f32>,
-}
-
-impl TextConfig {
-    fn to_flags(&self) -> u32 {
-        let mut result = 0;
-
-        if self.baseline {
-            result |= 1 << 0;
-        }
-
-        if self.color.is_some() {
-            result |= 1 << 1;
-        }
-
-        result |= match self.align {
-            TextAlign::Left => 0 << 2,
-            TextAlign::Right => 1 << 2,
-            TextAlign::Center => 2 << 2,
-            TextAlign::Justified => 3 << 2,
-        };
-
-        if self.wrap_width.is_some() {
-            result |= 1 << 4;
-        }
-
-        result
-    }
-}
-
-pub struct Text<'gfx, 'buf, 'font> {
-    text: c::C2D_Text,
-    _phantom: PhantomData<(&'gfx (), &'buf (), &'font ())>,
-}
-
-impl<'gfx, 'buf, 'font> Text<'gfx, 'buf, 'font> {
-    pub fn parse(
-        font: Option<&'font Font<'gfx>>,
-        buf: &'buf TextBuf<'gfx>,
-        str: &str,
-    ) -> Result<Self, Box<dyn Error>> {
-        let str = CString::new(str)?;
-        let text = unsafe {
-            let mut text = MaybeUninit::uninit();
-            // docs say that this can fail, but afaict it can't
-            if c::C2D_TextFontParse(
-                text.as_mut_ptr(),
-                match font {
-                    Some(font) => font.font,
-                    None => std::ptr::null_mut(),
-                },
-                buf.buf,
-                str.as_ptr(),
-            )
-            .is_null()
-            {
-                panic!("C2D_TextFontParse() failed");
-            }
-            text.assume_init()
-        };
-        Ok(Self {
-            text,
-            _phantom: PhantomData,
-        })
-    }
-
-    #[inline]
-    pub fn optimize(&self) {
-        unsafe {
-            c::C2D_TextOptimize(&self.text);
-        }
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn dimensions(&self, scale: f32) -> (f32, f32) {
-        let mut width = 0.0;
-        let mut height = 0.0;
-        unsafe {
-            c::C2D_TextGetDimensions(&self.text, scale, scale, &mut width, &mut height);
-        }
-        (width, height)
-    }
-
-    pub fn draw(&self, _ctx: &Scene2d, config: &TextConfig, x: f32, y: f32, scale: f32) {
-        let flags = config.to_flags();
-        unsafe {
-            if let Some(width) = config.wrap_width {
-                if let Some(color) = config.color {
-                    c::C2D_DrawText(
-                        &self.text,
-                        flags,
-                        x,
-                        y,
-                        0.5,
-                        scale,
-                        scale,
-                        color,
-                        width as std::ffi::c_double,
-                    );
-                } else {
-                    c::C2D_DrawText(
-                        &self.text,
-                        flags,
-                        x,
-                        y,
-                        0.5,
-                        scale,
-                        scale,
-                        width as std::ffi::c_double,
-                    );
-                }
-            } else if let Some(color) = config.color {
-                c::C2D_DrawText(&self.text, flags, x, y, 0.5, scale, scale, color);
-            } else {
-                c::C2D_DrawText(&self.text, flags, x, y, 0.5, scale, scale);
-            }
         }
     }
 }

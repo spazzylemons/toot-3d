@@ -21,12 +21,17 @@ fn logic_main(tx: UiMsgSender) -> Result<(), Box<dyn Error>> {
     let pool = LogicImgPool::new(tx.clone());
     let client = net::Client::new(tx.clone(), pool.clone())?;
 
-    tx.send(UiMsg::SetScreen(Box::new(TimelineScreen::new(&client)?)))?;
+    tx.send(UiMsg::SetScreen(Box::new(TimelineScreen::new(
+        &client,
+        tx.clone(),
+    )?)))?;
 
     Ok(())
 }
 
 fn main() {
+    ctru::use_panic_handler();
+
     let gfx = Gfx::init().unwrap();
     let c2d = Citro2d::new(gfx).unwrap();
     let _console = ctru::console::Console::init(c2d.gfx().bottom_screen.borrow_mut());
@@ -37,7 +42,7 @@ fn main() {
     let logic = spawn(move || {
         let tx = tx;
         if let Err(e) = logic_main(tx.clone()) {
-            let (screen, rx) = ErrorScreen::new(format!("{}", e));
+            let (screen, rx) = ErrorScreen::new(format!("{}", e), tx.clone());
             tx.send(UiMsg::SetScreen(Box::new(screen))).unwrap();
             // wait for screen to request close
             rx.recv().unwrap();
