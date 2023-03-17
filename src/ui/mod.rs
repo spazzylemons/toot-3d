@@ -1,4 +1,5 @@
 pub mod citro2d;
+mod image;
 mod kbd;
 pub mod screen;
 mod text;
@@ -19,6 +20,8 @@ use self::{
     citro2d::{color32, Citro2d, Image, RenderTarget, Scene2d},
     text::{TextLines, TextRenderer},
 };
+
+pub use self::image::download_image;
 
 pub struct Ui<'gfx, 'screen> {
     apt: Apt,

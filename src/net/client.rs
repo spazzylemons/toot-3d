@@ -1,4 +1,4 @@
-use std::{borrow::Cow, error::Error, fmt::Display, fs::File};
+use std::{borrow::Cow, error::Error, fmt::Display, fs::File, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -144,9 +144,7 @@ impl Client {
         // if we failed to load from file, do auth flow to get data
         if !loaded_from_file {
             result.authorize()?;
-            result.update_auth()?;
         } else {
-            result.update_auth()?;
             // check if we need new credentials
             if !result.verify()? {
                 result.obtain_token()?;
@@ -162,9 +160,26 @@ impl Client {
         Ok(result)
     }
 
-    fn get(&self, url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn maybe_auth(&self, url: &str) -> Result<(), Box<dyn Error>> {
+        let mut needs_auth = false;
+        if !self.data.token.is_empty() {
+            if let Some(s) = ::url::Url::from_str(url)?.domain() {
+                if s == self.data.instance {
+                    needs_auth = true;
+                }
+            }
+        }
+        if needs_auth {
+            self.easy.bearer(Some(&self.data.token))
+        } else {
+            self.easy.bearer(None)
+        }
+    }
+
+    pub fn get(&self, url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         self.easy.url(url)?;
         self.easy.no_verify()?;
+        self.maybe_auth(url)?;
         self.easy.perform()?;
         let response = self.easy.response_code()?;
         let buffer = self.easy.buffer();
@@ -175,9 +190,10 @@ impl Client {
         }
     }
 
-    fn post(&self, url: &str, fields: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn post(&self, url: &str, fields: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn Error>> {
         self.easy.url(url)?;
         self.easy.no_verify()?;
+        self.maybe_auth(url)?;
         let mime = self.easy.mime();
         for (name, data) in fields {
             mime.add_part(name, data)?;
@@ -238,14 +254,6 @@ impl Client {
         }
     }
 
-    fn update_auth(&self) -> Result<(), Box<dyn Error>> {
-        if self.data.token.is_empty() {
-            self.easy.bearer(None)
-        } else {
-            self.easy.bearer(Some(&self.data.token))
-        }
-    }
-
     fn obtain_token(&mut self) -> Result<(), Box<dyn Error>> {
         // authorize user here
         let request_url = format!(
@@ -281,7 +289,6 @@ impl Client {
 
         let token = serde_json::from_slice::<Token>(&buffer)?;
         self.data.token = token.access_token;
-        self.update_auth()?;
 
         Ok(())
     }

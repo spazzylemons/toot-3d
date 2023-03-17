@@ -6,14 +6,23 @@ use quick_xml::events::Event;
 use crate::{
     net::Client,
     ui::{
-        citro2d::{color32, RenderTarget, Scene2d},
+        citro2d::{color32, Image, RenderTarget, Scene2d, RGBA8},
+        download_image,
         text::TextLines,
-        Screen, Ui, UiMsg, UiMsgSender,
+        LogicImgPool, OpaqueImg, Screen, Ui, UiMsg, UiMsgSender,
     },
 };
 
+struct TimelineStatus {
+    width: u16,
+    height: u16,
+    // TODO avoid duplicate avatars - waste of memory to allocate duplicates
+    avatar: OpaqueImg,
+    content: TextLines,
+}
+
 pub struct TimelineScreen {
-    statuses: Vec<TextLines>,
+    statuses: Vec<TimelineStatus>,
     scroll: f32,
 }
 
@@ -48,11 +57,15 @@ fn parse_html(html: &str) -> Result<String, Box<dyn Error>> {
 }
 
 impl TimelineScreen {
-    pub fn new(client: &Client, tx: UiMsgSender) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        client: &Client,
+        pool: &LogicImgPool,
+        tx: UiMsgSender,
+    ) -> Result<Self, Box<dyn Error>> {
         let statuses = client
             .get_home_timeline()?
             .into_iter()
-            .map(|status| -> Result<TextLines, Box<dyn Error>> {
+            .map(|status| -> Result<TimelineStatus, Box<dyn Error>> {
                 let (lines_tx, lines_rx) = std::sync::mpsc::channel();
                 tx.send(UiMsg::WordWrap {
                     text: format!(
@@ -64,7 +77,15 @@ impl TimelineScreen {
                     scale: 0.5,
                     tx: lines_tx,
                 })?;
-                Ok(lines_rx.recv()?)
+                let content = lines_rx.recv()?;
+                let (width, height, avatar) =
+                    download_image(client, pool, &status.account.avatar_static, Some(32))?;
+                Ok(TimelineStatus {
+                    width,
+                    height,
+                    avatar,
+                    content,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
@@ -86,8 +107,23 @@ impl Screen for TimelineScreen {
         let mut scroll = 20.0 - self.scroll;
 
         for status in &self.statuses {
-            ui.draw_lines(ctx, 20.0, scroll, color32(255, 255, 255, 255), status);
-            scroll += status.height();
+            ui.draw_opaque_img(
+                &status.avatar,
+                ctx,
+                20.0,
+                scroll,
+                32.0 / f32::from(status.width),
+                32.0 / f32::from(status.height),
+            );
+            scroll += 32.0;
+            ui.draw_lines(
+                ctx,
+                20.0,
+                scroll,
+                color32(255, 255, 255, 255),
+                &status.content,
+            );
+            scroll += status.content.height();
         }
     }
 

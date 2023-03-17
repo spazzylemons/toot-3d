@@ -258,6 +258,21 @@ impl TextureFormat for Luminance4 {
     }
 }
 
+/// An 8-bit RGBA texture format. The highest quality, but most expensive.
+pub struct RGBA8;
+
+impl TextureFormat for RGBA8 {
+    type Pixel = u32;
+
+    const FORMAT: c::GPU_TEXCOLOR = c::GPU_TEXCOLOR_GPU_RGBA8;
+
+    unsafe fn set(data: *mut std::ffi::c_void, x: u16, y: u16, width: u16, pixel: Self::Pixel) {
+        let index = buffer_offset(x.into(), y.into(), width.into(), 8);
+        let byte_ptr = (data as *mut u8).add(index) as *mut u32;
+        *byte_ptr = pixel;
+    }
+}
+
 /// A verified texture dimension.
 pub struct TexDim(u16);
 

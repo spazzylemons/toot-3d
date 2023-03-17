@@ -23,6 +23,7 @@ fn logic_main(tx: UiMsgSender) -> Result<(), Box<dyn Error>> {
 
     tx.send(UiMsg::SetScreen(Box::new(TimelineScreen::new(
         &client,
+        &pool,
         tx.clone(),
     )?)))?;
 
