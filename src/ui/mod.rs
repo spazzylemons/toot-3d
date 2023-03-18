@@ -21,7 +21,7 @@ use self::{
     text::{TextLines, TextRenderer},
 };
 
-pub use self::image::download_image;
+pub use self::image::{CachedImage, WebImage, WebImageCache};
 
 pub struct Ui<'gfx, 'screen> {
     apt: Apt,
@@ -70,14 +70,11 @@ impl<'gfx: 'screen, 'screen> Ui<'gfx, 'screen> {
         // check for all new messages
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
-                UiMsg::LoadImage(id, func) => match func(self.c2d) {
-                    Ok(img) => {
+                UiMsg::LoadImage(id, func) => {
+                    if let Ok(img) = func(self.c2d) {
                         self.pool.insert(id, img);
                     }
-                    Err(e) => {
-                        println!("image load failed: {e}");
-                    }
-                },
+                }
 
                 UiMsg::UnloadImage(id) => {
                     self.pool.remove(&id);
@@ -265,7 +262,7 @@ impl Drop for OpaqueImg {
     }
 }
 
-pub trait Screen: Send {
+pub trait Screen: Send + Sync {
     fn update(&mut self, hid: &Hid) {
         _ = hid;
     }

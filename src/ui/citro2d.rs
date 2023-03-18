@@ -4,7 +4,7 @@ use std::{
     fmt::Display,
     marker::PhantomData,
     mem::MaybeUninit,
-    ops::Deref,
+    num::NonZeroU16,
     pin::Pin,
     rc::Rc,
     sync::{
@@ -274,7 +274,8 @@ impl TextureFormat for RGBA8 {
 }
 
 /// A verified texture dimension.
-pub struct TexDim(u16);
+#[derive(Clone, Copy)]
+pub struct TexDim(NonZeroU16);
 
 #[derive(Debug)]
 pub struct TexDimError;
@@ -293,7 +294,8 @@ impl TexDim {
 
     pub fn to_fit(dim: u16) -> Result<Self, TexDimError> {
         if dim < 8 {
-            return Ok(Self(8));
+            // SAFETY: 8 does not equal 0
+            return Ok(unsafe { Self::assume_valid(8) });
         }
         let log2 = dim.ilog2();
         let result = if 1 << log2 == dim {
@@ -304,19 +306,17 @@ impl TexDim {
         if result > Self::MAX {
             return Err(TexDimError);
         }
-        Ok(Self(result))
+        Ok(unsafe { Self::assume_valid(result) })
     }
 
     pub unsafe fn assume_valid(dim: u16) -> Self {
-        Self(dim)
+        Self(NonZeroU16::new_unchecked(dim))
     }
 }
 
-impl Deref for TexDim {
-    type Target = u16;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Into<u16> for TexDim {
+    fn into(self) -> u16 {
+        self.0.get()
     }
 }
 
@@ -367,7 +367,7 @@ impl<'gfx> AnyTexture<'gfx> {
         // TODO handle potential error
         let mut tex = unsafe {
             let mut tex = MaybeUninit::uninit();
-            if !c::C3D_TexInit_NotInlined(tex.as_mut_ptr(), *width, *height, format) {
+            if !c::C3D_TexInit_NotInlined(tex.as_mut_ptr(), width.into(), height.into(), format) {
                 return Err(C2dMemError);
             }
             tex.assume_init()
@@ -399,8 +399,8 @@ impl<'gfx> AnyTexture<'gfx> {
         tex.set_size(data.len() as _);
         tex.border = 0;
         tex.__bindgen_anon_1.data = data.as_mut_ptr() as *mut _;
-        tex.__bindgen_anon_2.__bindgen_anon_1.width = *width;
-        tex.__bindgen_anon_2.__bindgen_anon_1.height = *height;
+        tex.__bindgen_anon_2.__bindgen_anon_1.width = width.into();
+        tex.__bindgen_anon_2.__bindgen_anon_1.height = height.into();
         tex.__bindgen_anon_3.lodParam = 0;
         c::C3D_TexSetWrap_NotInlined(
             &mut tex,

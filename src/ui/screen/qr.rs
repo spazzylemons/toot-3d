@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, sync::Mutex};
 
 use bit_set::BitSet;
 use qrcode::{
@@ -58,13 +58,13 @@ impl Canvas for MyCanvas {
 }
 
 pub struct QrScreen {
-    qr_code: OpaqueImg,
+    qr_code: Mutex<OpaqueImg>,
     width: u16,
     height: u16,
 }
 
 impl QrScreen {
-    pub fn new(data: &[u8], pool: LogicImgPool) -> Result<Self, Box<dyn Error>> {
+    pub fn new(data: &[u8], pool: LogicImgPool) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let qr = QrCode::new(data)?;
         let image = qr.render::<MyPixel>().build();
         let width = image.width as u16;
@@ -90,7 +90,7 @@ impl QrScreen {
             })
         });
         Ok(Self {
-            qr_code,
+            qr_code: Mutex::new(qr_code),
             width,
             height,
         })
@@ -107,6 +107,7 @@ impl Screen for QrScreen {
         let x = 200.0 - f32::from(self.width);
         let y = 120.0 - f32::from(self.height);
         target.clear(color32(0, 0, 0, 255));
-        ui.draw_opaque_img(&self.qr_code, ctx, x, y, 2.0, 2.0);
+        let qr_code = self.qr_code.lock().unwrap();
+        ui.draw_opaque_img(&qr_code, ctx, x, y, 2.0, 2.0);
     }
 }

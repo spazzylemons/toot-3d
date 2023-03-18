@@ -1,4 +1,7 @@
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{
+    mpsc::{Receiver, Sender},
+    Mutex,
+};
 
 use ctru::prelude::KeyPad;
 
@@ -10,7 +13,7 @@ use crate::ui::{
 
 pub struct ErrorScreen {
     message: TextLines,
-    on_close: Sender<()>,
+    on_close: Mutex<Sender<()>>,
 }
 
 impl ErrorScreen {
@@ -25,7 +28,13 @@ impl ErrorScreen {
         .unwrap();
         let message = lines_rx.recv().unwrap();
         let (on_close, rx) = std::sync::mpsc::channel();
-        (Self { message, on_close }, rx)
+        (
+            Self {
+                message,
+                on_close: Mutex::new(on_close),
+            },
+            rx,
+        )
     }
 }
 
@@ -33,7 +42,7 @@ impl Screen for ErrorScreen {
     fn update(&mut self, hid: &ctru::services::Hid) {
         // tell logic thread to close the screen when start is pressed
         if hid.keys_down().contains(KeyPad::KEY_START) {
-            self.on_close.send(()).unwrap();
+            self.on_close.lock().unwrap().send(()).unwrap();
         }
     }
 

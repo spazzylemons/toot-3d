@@ -1,4 +1,5 @@
 pub mod curl;
+pub mod retriever;
 
 mod client;
 
